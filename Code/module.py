@@ -14,7 +14,8 @@ import os
 import sys
 from torchvision import datasets, transforms, models
 import torch.nn as nn
-import torch.optim as optim
+from torchvision.datasets import ImageFolder
+from torchvision.transforms import transforms
 
 def get_class_labels(root_dir):
     
@@ -23,39 +24,42 @@ def get_class_labels(root_dir):
         class_labels[i] = directory
     return class_labels
 
-def samples_dataset(data_transforms, image_directory, test_size):
-    
-    class_labels = get_class_labels(image_directory)
-    dataset_full = datasets.ImageFolder(image_directory, data_transforms, target_transform=lambda x: class_labels[x])
+def compute_mean_std(dataset):
+    """Compute mean and standard deviation of a dataset"""
+    mean = torch.zeros(3)
+    std = torch.zeros(3)
+    for data in dataset:
+        img, _ = data
+        mean += img.mean(dim=(1, 2))
+        std += img.std(dim=(1, 2))
+    mean /= len(dataset)
+    std /= len(dataset)
+    return mean, std
 
-    np.random.seed(42)
-    samples_train, samples_test = train_test_split(dataset_full.samples)
-    samples_train, samples_val = train_test_split(samples_train,test_size=test_size)
+def dataset(data_transforms, train_path, valid_path, test_path):
     
-    return samples_train, samples_val, samples_test
-
-def dataset(data_transforms, image_directory, test_size):
+    # Loading datasets
+    train_dataset = ImageFolder(train_path, transform=data_transforms)
+    val_dataset = ImageFolder(valid_path, transform=data_transforms)
+    test_dataset = ImageFolder(test_path, transform=data_transforms)
     
-    samples_train, samples_val, samples_test = samples_dataset(data_transforms, image_directory, test_size)
-    
-    dataset_train = datasets.ImageFolder(image_directory, data_transforms)
-    dataset_train.samples = samples_train
-    dataset_train.imgs = samples_train
-
-    dataset_test = datasets.ImageFolder(image_directory, data_transforms)
-    dataset_test.samples = samples_test
-    dataset_test.imgs = samples_test
-
-    dataset_val = datasets.ImageFolder(image_directory, data_transforms)
-    dataset_val.samples = samples_val
-    dataset_val.imgs = samples_val
-    
-    return dataset_train, dataset_val, dataset_test
+    return train_dataset, val_dataset, test_dataset
 
 
 def loader(dataset, batch_size, shuffle = True, num_workers=0):
 
     return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+
+
+def output_layer_adaptation(list_model, num_classes):
+    for model in list_model:
+        if(model.__class__.__name__=="ResNet"):
+            num_ftrs = model.fc.in_features
+            model.fc = nn.Linear(num_ftrs, num_classes)
+        else:
+            num_ftrs = model.classifier[-1].in_features
+            model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
+    return list_model
 
 
 def evaluate(model, dataset):
@@ -101,9 +105,6 @@ def train_model(model, loader_train, data_val, optimizer, criterion, n_epochs=10
             loss.backward() # on effectue la backprop pour calculer les gradients
             optimizer.step() # on update les gradients en fonction des paramètres
 
-my_net = models.resnet18(pretrained=True)
-criterion =  nn.CrossEntropyLoss()
-optimizer = optim.SGD(my_net.fc.parameters(), lr=0.001, momentum=0.9)
 
 def transfer_learning(my_net, train_dataset, val_dataset, criterion, optimizer, nb_classes, n_epochs=5):
     
