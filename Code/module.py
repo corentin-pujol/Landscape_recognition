@@ -16,6 +16,10 @@ from torchvision import datasets, transforms, models
 import torch.nn as nn
 from torchvision.datasets import ImageFolder
 from torchvision.transforms import transforms
+from tqdm import tqdm
+import statistics
+import matplotlib.pyplot as plt
+import pandas as pd
 
 def get_class_labels(root_dir):
     
@@ -61,64 +65,209 @@ def output_layer_adaptation(list_model, num_classes):
             model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
     return list_model
 
+def loading_models():
+    resnet18 = models.resnet18(pretrained=True)
+    mobilenet = models.mobilenet_v2(pretrained=True)
+    vgg16 = models.vgg16(pretrained=True)
+    alexnet = models.alexnet(pretrained=True)
 
-def evaluate(model, dataset):
+    my_models = [resnet18, mobilenet, vgg16, alexnet]
+    return my_models
+
+def get_epoch_metrics_mean(train_losses, val_losses, train_accs, val_accs, n_epoch):
+    epoch_train_losses = []
+    epoch_val_losses = []
+    epoch_train_accs = []
+    epoch_val_accs = []
+
+    # Calcule la moyenne de perte et d'accuracy pour chaque epoch
+    for i in range(n_epoch):
+        start_index = i * 250
+        end_index = start_index + 250
+
+        epoch_train_loss = sum(train_losses[start_index:end_index]) / 250
+        epoch_val_loss = sum(val_losses[start_index:end_index]) / 250
+        epoch_train_acc = sum(train_accs[start_index:end_index]) / 250
+        epoch_val_acc = sum(val_accs[start_index:end_index]) / 250
+
+        epoch_train_losses.append(epoch_train_loss)
+        epoch_val_losses.append(epoch_val_loss)
+        epoch_train_accs.append(epoch_train_acc)
+        epoch_val_accs.append(epoch_val_acc)
+
+    return epoch_train_losses, epoch_val_losses, epoch_train_accs, epoch_val_accs
+
+def performance_curve(performance_dico, n_epoch):
+    fig, axs = plt.subplots(2, len(performance_dico), figsize=(20, 8))
+    axs = axs.flatten()
+
+    for i, (k, v) in enumerate(performance_dico.items()):
+        train_losses, val_losses, train_accs, val_accs = v["history"]
+        #train_losses, val_losses, train_accs, val_accs = get_epoch_metrics_mean(train_losses, val_losses, train_accs, val_accs, n_epoch)
+        
+        # Plot training and validation losses
+        axs[i].plot(train_losses, label='Training Loss')
+        axs[i].plot(val_losses, label='Validation Loss')
+        axs[i].set_xlabel('Epoch')
+        axs[i].set_ylabel('Loss')
+        axs[i].legend()
+        axs[i].set_title("Training and validation Loss of " + v["model"].__class__.__name__ + " model")
+
+        # Plot training and validation accuracies
+        axs[len(performance_dico) + i].plot(train_accs, label='Training Accuracy')
+        axs[len(performance_dico) + i].plot(val_accs, label='Validation Accuracy')
+        axs[len(performance_dico) + i].set_xlabel('Epoch')
+        axs[len(performance_dico) + i].set_ylabel('Accuracy')
+        axs[len(performance_dico) + i].legend()
+        axs[len(performance_dico) + i].set_title("Training and validation accuracies of " + v["model"].__class__.__name__ + " model")
+
+    plt.tight_layout()
+    plt.show()
+
+    
+def evaluate(model, dataset, device, criterion):
     
     model.train(False)
-    
-    avg_loss = 0.
-    avg_accuracy = 0
-    loader = torch.utils.data.DataLoader(dataset, batch_size=16, shuffle=False, num_workers=2)
+    val_losses = []
+    val_accs = []
+    #10 000/40 = 250, then to get 250 value for datavalidation we need to have 1500/250 -> 6
+    loader = torch.utils.data.DataLoader(dataset, batch_size=6, shuffle=False, num_workers=0)  
     for data in loader:
         inputs, labels = data
         inputs, labels = inputs.to(device), labels.to(device)
         outputs = model(inputs)
         
-        loss = criterion(outputs, labels)
-        _, preds = torch.max(outputs, 1)
-        n_correct = torch.sum(preds == labels)
+        loss = criterion(outputs, labels)        
+        val_losses.append(loss.item())
+
+        # Calcul de l'accuracy
+        _, predicted = torch.max(outputs.data, 1)
+        acc = (predicted == labels).sum().item() / len(labels)
+        val_accs.append(acc)
         
-        avg_loss += loss.item()
-        avg_accuracy += n_correct
-        
-    return avg_loss / len(dataset), float(avg_accuracy) / len(dataset)
+    return val_losses, val_accs
 
 
 # fonction classique d'entraînement d'un modèle, voir TDs précédents
-def train_model(model, loader_train, data_val, optimizer, criterion, n_epochs=10, PRINT_LOSS = True):
+def train_model(model, loader_train, data_val, optimizer, criterion, device, file_name, scheduler=None, n_epochs=10):
+    """
+    Params
+    --------
+        model (PyTorch model): cnn to train
+        loader_train (PyTorch dataloader): training dataloader to iterate through
+        data_val (PyTorch dataloader): validation dataloader used for early stopping
+        optimizer (PyTorch optimizer): optimizer to compute gradients of model parameters
+        criterion (PyTorch loss): objective to minimize
+        device (torch.device("cuda:0" if torch.cuda.is_available() else "cpu")), allowing to use the GPU if exists
+        file_name (str): file path to save the model state dict
+        n_epochs (int): maximum number of training epochs
+
+    Returns
+    --------
+        model (PyTorch model): trained cnn with best weights
+        history (DataFrame): history of train and validation loss and accuracy
+    """
+    valid_loss_min = np.Inf
     
+    # keep track of training and validation loss each epoch
+    train_losses = []
+    train_accs = []
+    val_losses = []
+    val_accs = []
+    
+    overall_start_time = time.time()
     for epoch in range(n_epochs): # à chaque epochs
+        
+        loss_train = []
+        accuracy_train = []
+        
         print("EPOCH % i" % epoch)
-        for i, data in enumerate(loader_train): # itère sur les minibatchs via le loader apprentissage
+
+        # Set to training
+        model.train()
+        epoch_start_time = time.time()
+        
+        for i, data in tqdm(enumerate(loader_train), total=len(loader_train)): # itère sur les minibatchs via le loader apprentissage
             inputs, labels = data
+            inputs = inputs.float()  # convert input tensor to float32
             inputs, labels = inputs.to(device), labels.to(device) # on passe les données sur CPU / GPU
             optimizer.zero_grad() # on réinitialise les gradients
             outputs = model(inputs) # on calcule l'output
             
             loss = criterion(outputs, labels) # on calcule la loss
-            if PRINT_LOSS:
-                model.train(False)
-                loss_val, accuracy = evaluate(my_net, data_val)
-                model.train(True)
-                print("{} loss train: {:1.4f}\t val {:1.4f}\tAcc (val): {:.1%}".format(i, loss.item(), loss_val, accuracy   ))
             
             loss.backward() # on effectue la backprop pour calculer les gradients
             optimizer.step() # on update les gradients en fonction des paramètres
+            
+            loss_train.append(loss.item())
 
-
-def transfer_learning(my_net, train_dataset, val_dataset, criterion, optimizer, nb_classes, n_epochs=5):
-    
-    for param in my_net.parameters():
-        param.requires_grad = False
+            # Calcul de l'accuracy
+            _, predicted = torch.max(outputs.data, 1)
+            acc = (predicted == labels).sum().item() / len(labels)
+            accuracy_train.append(acc)
         
-    my_net.fc = nn.Linear(in_features=my_net.fc.in_features, out_features=nb_classes, bias=True)
-    my_net.to(device) 
-    my_net.train(True)
-    
-    torch.manual_seed(42)
-    train_model(my_net, train_dataset, val_dataset, optimizer, criterion, n_epochs=n_epochs)
-    
+        train_losses.append(statistics.mean(loss_train))
+        train_accs.append(statistics.mean(accuracy_train))
+        # Don't need to keep track of gradients
+        with torch.no_grad():
+            # Set to evaluation mode
+            model.eval()
 
+            model.train(False)
+            loss_val, accuracy_val = evaluate(model, data_val, device, criterion)
+            val_losses.append(statistics.mean(loss_val))
+            val_accs.append(statistics.mean(accuracy_val))
+            model.train(True)
+            print("{} loss train: {:1.4f}\t acc train: {:1.4f}\t loss val {:1.4f}\t Acc (val): {:.1%}".format(i, statistics.mean(loss_train), statistics.mean(accuracy_train), statistics.mean(loss_val), statistics.mean(accuracy_val)))
+            
+            if scheduler is not None:
+                # Update scheduler
+                scheduler.step(statistics.mean(loss_val))
+
+            if statistics.mean(loss_val) < valid_loss_min:
+                
+                print(file_name + " saved: " + str(statistics.mean(loss_val)) + " < " + str(valid_loss_min))
+                valid_loss_min = statistics.mean(loss_val)
+                
+                # Save model
+                torch.save(model, file_name)
+                    
+        
+    # Attach the optimizer
+    model.optimizer = optimizer
+    # Record overall time and print out stats
+    total_time = time.time() - overall_start_time
+    
+    history = [train_losses, val_losses, train_accs, val_accs]
+    return model, history, total_time
+
+def affichage_performance(dico_result):
+    
+    models = []
+    accuracy = []
+    inference_times = []
+    parameters = []
+    for k, v in dico_result.items():
+        
+        total_params = sum(p.numel() for p in v["model"].parameters())
+        models.append(k)
+        train_losses, val_losses, train_accs, val_accs = v["history"]
+        index_min_loss = val_losses.index(min(val_losses))
+        accuracy.append(val_accs[index_min_loss])
+        inference_times.append(v['time'])
+        parameters.append(total_params)
+        
+    # Créer un dictionnaire de données
+    data = {'Modèles': models,
+            'Accuracy': accuracy,
+            'Inference time': inference_times,
+            'Total number of parameters':parameters}
+
+    # Créer un DataFrame à partir du dictionnaire de données
+    df = pd.DataFrame(data)
+
+    # Afficher le DataFrame sous forme de tableau
+    print(df) 
     
 def fine_tunning(my_net, train_dataset, val_dataset, criterion, optimizer, nb_classes, list_of_layers_to_finetune, n_epochs=5):
     
@@ -138,67 +287,6 @@ def fine_tunning(my_net, train_dataset, val_dataset, criterion, optimizer, nb_cl
     torch.manual_seed(42)
     train_model(my_net, train_dataset, val_dataset, optimizer, criterion, n_epochs=5)
 
-def save_model(my_net, model_path):
-    
-    torch.save(my_net.state_dict(), model_path)
-
-def load_model(model_class, new_fc, model_path):
-        
-    model = model_class
-
-    model.fc = new_fc
-
-    model.load_state_dict(torch.load(model_path))
-    
-    return model
-
-
-# on définit une fonction pour classifier une image
-def classify_image(model, image_path):
-    # Open Image
-    img = Image.open(image_path)
-    
-    # Apply the transformations
-    img_transformed = data_transforms(img)
-    
-    # unsqueeze batch dimension, in case you are dealing with a single image
-    img_unsquueeze = img_transformed.unsqueeze(0)
-    
-    # Set model to eval
-    model.eval()
-    
-    # Prediction Time Start
-    start_time = time.time()
-    
-    # Get prediction
-    output = model(img_unsquueeze) 
-    
-    # Prediction Time End
-    end_time = time.time()
-    
-    # Extract prediction 
-    score, preds = torch.max(output, 1)
-    
-    # Compute Classification Time
-    classification_time = end_time - start_time
-    
-    # Compute Classification Score
-    confidence = (score / output.abs().sum()) * 100
-    confidence = round(confidence.item(),1)
-
-    global class_labels
-    label = class_labels[preds.item()]
-    
-    t = round(classification_time*1000,3)
-    
-    model_name = model.__class__.__name__
-    
-    json_result= {"Image" : image_path , "Prediction" : label , "Confidence_prc" : confidence , "Time_ms" : t,
-                  "Model" : model_name , "Machine" : torch.cuda.get_device_name(0) }
-    
-    print( "Prediction: " + str(label) + " - Confidence: " + str(confidence)+"% - Time: " + str(t) + " milliseconds" )
-    
-    return json_result
 
 
 
