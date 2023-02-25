@@ -55,15 +55,54 @@ def loader(dataset, batch_size, shuffle = True, num_workers=0):
     return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
 
 
-def output_layer_adaptation(list_model, num_classes):
+# def output_layer_adaptation(list_model, num_classes):
+#     for model in list_model:
+#         if(model.__class__.__name__=="ResNet"):
+#             num_ftrs = model.fc.in_features
+#             model.fc = nn.Linear(num_ftrs, num_classes)
+#         else:
+#             num_ftrs = model.classifier[-1].in_features
+#             model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
+#     return list_model
+
+def output_layer_adaptation(list_model, num_classes, dropout_prob=0.5, l2_reg=0.01):
+    """
+    
+    dropout_prob est le taux de dropout, c'est-à-dire la probabilité qu'un neurone soit mis à zéro pendant l'entraînement. Cela permet d'éviter l'overfitting en forçant le réseau à ne pas trop dépendre de certains neurones spécifiques.
+
+l2_reg est le paramètre de régularisation L2, qui permet de contrôler la complexité du modèle en ajoutant une pénalité sur les grands poids. Cela peut également aider à éviter l'overfitting.
+    """
+    
     for model in list_model:
-        if(model.__class__.__name__=="ResNet"):
+        if model.__class__.__name__ == "ResNet":
             num_ftrs = model.fc.in_features
-            model.fc = nn.Linear(num_ftrs, num_classes)
+            model.fc = nn.Sequential(
+                nn.Linear(num_ftrs, num_classes),
+                nn.ReLU(),
+                nn.Dropout(p=dropout_prob),
+                nn.Linear(num_classes, num_classes),
+                nn.ReLU(),
+                nn.Dropout(p=dropout_prob)
+            )
         else:
             num_ftrs = model.classifier[-1].in_features
-            model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
+            model.classifier[-1] = nn.Sequential(
+                nn.Linear(num_ftrs, num_classes),
+                nn.ReLU(),
+                nn.Dropout(p=dropout_prob),
+                nn.Linear(num_classes, num_classes),
+                nn.ReLU(),
+                nn.Dropout(p=dropout_prob)
+            )
+        
+        # Add L2 regularization
+        for param in model.fc.parameters():
+            param.requires_grad = True
+            if len(param.shape) == 2:
+                param.register_hook(lambda grad, l2_reg=l2_reg: grad + l2_reg * torch.mean(param))
+                
     return list_model
+
 
 def loading_models():
     resnet18 = models.resnet18(pretrained=True)
