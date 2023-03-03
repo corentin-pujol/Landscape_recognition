@@ -49,6 +49,15 @@ def dataset(data_transforms, train_path, valid_path, test_path):
     
     return train_dataset, val_dataset, test_dataset
 
+def dataset_with_data_augmentation(train_data_transforms, data_transforms, train_path, valid_path, test_path):
+    
+    # Loading datasets
+    train_dataset = ImageFolder(train_path, transform=train_data_transforms)
+    val_dataset = ImageFolder(valid_path, transform=data_transforms)
+    test_dataset = ImageFolder(test_path, transform=data_transforms)
+    
+    return train_dataset, val_dataset, test_dataset
+
 
 def loader(dataset, batch_size, shuffle = True, num_workers=0):
 
@@ -65,7 +74,7 @@ def loader(dataset, batch_size, shuffle = True, num_workers=0):
 #             model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
 #     return list_model
 
-def output_layer_adaptation(list_model, num_classes, dropout_prob=0.5, l2_reg=0.01):
+def output_layer_adaptation(list_model, num_classes, dropout_prob=0.3, l2_reg=0.01):
     """
     
     dropout_prob est le taux de dropout, c'est-à-dire la probabilité qu'un neurone soit mis à zéro pendant l'entraînement. Cela permet d'éviter l'overfitting en forçant le réseau à ne pas trop dépendre de certains neurones spécifiques.
@@ -77,29 +86,29 @@ l2_reg est le paramètre de régularisation L2, qui permet de contrôler la comp
         if model.__class__.__name__ == "ResNet":
             num_ftrs = model.fc.in_features
             model.fc = nn.Sequential(
-                nn.Linear(num_ftrs, num_classes),
+                nn.Linear(num_ftrs, 256),
                 nn.ReLU(),
                 nn.Dropout(p=dropout_prob),
-                nn.Linear(num_classes, num_classes),
-                nn.ReLU(),
-                nn.Dropout(p=dropout_prob)
+                nn.Linear(256, num_classes)
             )
+            # Add L2 regularization
+            for param in model.fc.parameters():
+                param.requires_grad = True
+                if len(param.shape) == 2:
+                    param.register_hook(lambda grad, l2_reg=l2_reg: grad + l2_reg * torch.mean(param))
         else:
             num_ftrs = model.classifier[-1].in_features
             model.classifier[-1] = nn.Sequential(
-                nn.Linear(num_ftrs, num_classes),
+                nn.Linear(num_ftrs, 256),
                 nn.ReLU(),
                 nn.Dropout(p=dropout_prob),
-                nn.Linear(num_classes, num_classes),
-                nn.ReLU(),
-                nn.Dropout(p=dropout_prob)
+                nn.Linear(256, num_classes)
             )
-        
-        # Add L2 regularization
-        for param in model.fc.parameters():
-            param.requires_grad = True
-            if len(param.shape) == 2:
-                param.register_hook(lambda grad, l2_reg=l2_reg: grad + l2_reg * torch.mean(param))
+            # Add L2 regularization
+            for param in model.classifier.parameters():
+                param.requires_grad = True
+                if len(param.shape) == 2:
+                    param.register_hook(lambda grad, l2_reg=l2_reg: grad + l2_reg * torch.mean(param))
                 
     return list_model
 
