@@ -21,6 +21,9 @@ import statistics
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
+
+
 def get_class_labels(root_dir):
     
     class_labels = {}
@@ -116,10 +119,10 @@ l2_reg est le paramètre de régularisation L2, qui permet de contrôler la comp
 def loading_models():
     resnet18 = models.resnet18(pretrained=True)
     mobilenet = models.mobilenet_v2(pretrained=True)
-    vgg16 = models.vgg16(pretrained=True)
-    alexnet = models.alexnet(pretrained=True)
+    #vgg16 = models.vgg16(pretrained=True)
+    #alexnet = models.alexnet(pretrained=True)
 
-    my_models = [resnet18, mobilenet, vgg16, alexnet]
+    my_models = [resnet18, mobilenet]
     return my_models
 
 def get_epoch_metrics_mean(train_losses, val_losses, train_accs, val_accs, n_epoch):
@@ -317,34 +320,122 @@ def affichage_performance(dico_result):
     # Afficher le DataFrame sous forme de tableau
     print(df) 
     
-def fine_tunning(my_net, train_dataset, val_dataset, criterion, optimizer, nb_classes, list_of_layers_to_finetune, n_epochs=5):
     
-    my_net.fc = nn.Linear(in_features=my_net.fc.in_features, out_features=nb_classes, bias=True)
-    my_net.to(device)
+def loading_models_to_finetune():
+
+    my_models = []
+    list_parameters = ["MobileNetV2_SGD_scheduler.pt", "ResNet_SGD_scheduler.pt"]
     
-    params_to_update = my_net.parameters()
-    list_of_layers_to_finetune=list_of_layers_to_finetune
-    params_to_update=[]
-    for name,param in my_net.named_parameters():
-        if(name in list_of_layers_to_finetune):
-            params_to_update.append(param)
-            param.requires_grad = True
-        else:
+    for i in range(len(list_parameters)):
+        
+        model = torch.load(list_parameters[i])
+        
+        for param in model.parameters():
             param.requires_grad = False
-    my_net_ft.train(True)
-    torch.manual_seed(42)
-    train_model(my_net, train_dataset, val_dataset, optimizer, criterion, n_epochs=5)
+
+        # Geler les paramètres de la dernière couche
+        if model.__class__.__name__ == "ResNet":
+            for name, module in model.named_children():
+                if name in ['layer4']:
+                    for param in module.parameters():
+                        param.requires_grad = True
+        else:
+            for name, param in model.named_parameters():
+                if "features.18" in name or "features.19" in name:
+                    param.requires_grad = True
+                
+        my_models.append(model)
+        
+    return my_models
+
+    
+def global_training(dico_transferlearning, dico_finetunning):
+    
+    fig, axs = plt.subplots(2, len(dico_transferlearning), figsize=(20, 8))
+    axs = axs.flatten()
+
+    for i, (k, v) in enumerate(dico_transferlearning.items()):
+        train_losses_1, val_losses_1, train_accs_1, val_accs_1 = v["history"]
+        train_losses_2, val_losses_2, train_accs_2, val_accs_2 = dico_finetunning[k]["history"]
+        
+        train_losses = train_losses_1 + train_losses_2
+        val_losses = val_losses_1 + val_losses_2
+        train_accs = train_accs_1 + train_accs_2
+        val_accs = val_accs_1 + val_accs_2
+        
+        axs[i].axvline(x=20, color='r', label='fine-tuning start') #Red line to separate the two steps
+        
+        # Plot training and validation losses
+        axs[i].plot(train_losses, label='Training Loss')
+        axs[i].plot(val_losses, label='Validation Loss')
+        axs[i].set_xlabel('Epoch')
+        axs[i].set_ylabel('Loss')
+        axs[i].legend()
+        axs[i].set_title("Training and validation Loss of " + v["model"].__class__.__name__ + " model")
+        
+        axs[len(dico_transferlearning) + i].axvline(x=20, color='r', label='fine-tuning start') #Red line to separate the two steps
+
+        # Plot training and validation accuracies
+        axs[len(dico_transferlearning) + i].plot(train_accs, label='Training Accuracy')
+        axs[len(dico_transferlearning) + i].plot(val_accs, label='Validation Accuracy')
+        axs[len(dico_transferlearning) + i].set_xlabel('Epoch')
+        axs[len(dico_transferlearning) + i].set_ylabel('Accuracy')
+        axs[len(dico_transferlearning) + i].legend()
+        axs[len(dico_transferlearning) + i].set_title("Training and validation accuracies of " + v["model"].__class__.__name__ + " model")
+
+    plt.tight_layout()
+    plt.show()
 
 
+def test_models(model, test_data):
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=4, shuffle=True)
+    
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model.to(device)
 
 
+    # Évaluer le modèle sur l'ensemble de test
+    model.eval()
+    y_true = []
+    y_pred = []
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            y_true += labels.tolist()
+            y_pred += predicted.tolist()
+            
+    
+    # Calculer la matrice de confusion et les métriques de performance
+    confusion = confusion_matrix(y_true, y_pred)
+    accuracy = accuracy_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, average='weighted')
+    recall = recall_score(y_true, y_pred, average='weighted')
+    f1 = f1_score(y_true, y_pred, average='weighted')
+    
+    
+    # Créer un dictionnaire contenant les métriques de performance
+    metrics = {'Model':[model.__class__.__name__], 'Accuracy': [accuracy], 'Precision': [precision], 'Recall': [recall], 'F1 score': [f1]}
+    # Convertir le dictionnaire en DataFrame
+    df_metrics = pd.DataFrame(metrics)
+   
+    return df_metrics, confusion
 
 
+def loading_models_to_test():
+    my_models = []
+    list_parameters = ["MobileNetV2_fine_tunning.pt", "ResNet_fine_tunning.pt"]
+    
+    for i in range(len(list_parameters)):
+        
+        model = torch.load(list_parameters[i])
+        
+        for param in model.parameters():
+            param.requires_grad = False
+        
+        model.eval()
+        my_models.append(model)
+    return my_models
 
-
-
-
-
-
-
-
+    
